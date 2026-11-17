@@ -99,3 +99,4 @@ WINEPREFIX=~/.wine-stove-staging WINEDEBUG=fixme-all,+imm,+key wine STOVE.exe > 
 
 - 정상이면 한글 조합 키는 holding 다음에 reporting, 영어 키는 holding 다음에 forwarded back이 나옴
 - 로그에는 채팅으로 친 내용도 남으니 확인 후 삭제
+- 게임 프로세스에 디버거(winedbg, gdb)는 붙이지 말 것. 보안 프로그램이 감지해서 게임이 꺼짐

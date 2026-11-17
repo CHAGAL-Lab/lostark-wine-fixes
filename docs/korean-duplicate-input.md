@@ -67,3 +67,4 @@ WINEPREFIX=~/.wine-stove-staging WINEDEBUG=fixme-all,+imm,+xim wine STOVE.exe > 
 - 로그에서 xim_set_result_string(확정 글자 도착), WM_IME_ENDCOMPOSITION(조합 끝), GCS_RESULTSTR(확정 글자 조회)이 어떤 순서로 나오는지 확인
 - Wine 출력은 파일로 받아야 함. 파이프로 넘기면(`| tail` 등) STOVE의 crashpad_handler가 파이프를 계속 잡고 있어서 명령이 끝나지 않음
 - 로그에는 채팅으로 친 내용도 남으니 확인 후 삭제
+- 게임 프로세스에 디버거(winedbg, gdb)는 붙이지 말 것. 보안 프로그램이 감지해서 게임이 꺼짐
