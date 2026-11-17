@@ -1,0 +1,23 @@
+--- a/dlls/imm32/imm.c	2026-11-17 11:44:01.701103760 +0900
++++ b/dlls/imm32/imm.c	2026-11-17 11:44:01.707826939 +0900
+@@ -3134,7 +3134,19 @@
+     count = ime->pImeToAsciiEx( vkey, scan, state, &buffer.list, 0, data->handle );
+     if (count >= ARRAY_SIZE(buffer.TransMsg)) return 0;
+ 
+-    for (i = 0; i < count; i++) PostMessageW( hwnd, msgs[i].message, msgs[i].wParam, msgs[i].lParam );
++    for (i = 0; i < count; i++)
++    {
++        /* imefix: winex11 tags keys the input method consumed. Games such as Lost Ark read
++         * skill keys from the WM_KEYDOWN handed back here, but a posted copy also goes through
++         * TranslateMessage and types the Latin letter next to the composed text. Deliver it
++         * directly so the window sees the key without a WM_CHAR. */
++        if (msgs[i].message == WM_KEYDOWN && msg == WM_KEYDOWN && GetMessageExtraInfo() == 0x494d4546)
++        {
++            TRACE( "imefix: sending consumed key %#Ix directly\n", msgs[i].wParam );
++            SendMessageW( hwnd, msgs[i].message, msgs[i].wParam, msgs[i].lParam );
++        }
++        else PostMessageW( hwnd, msgs[i].message, msgs[i].wParam, msgs[i].lParam );
++    }
+     TRACE( "%u messages generated\n", count );
+ 
+     return count > 0;

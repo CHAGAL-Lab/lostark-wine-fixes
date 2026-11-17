@@ -1,0 +1,170 @@
+--- a/dlls/winex11.drv/event.c	2026-11-17 11:09:53.543715263 +0900
++++ b/dlls/winex11.drv/event.c	2026-11-17 11:52:43.988301595 +0900
+@@ -374,14 +374,28 @@
+     if (!data) return FALSE;
+     if (data->current_event) mask = 0;  /* don't process nested events */
+ 
++    X11DRV_FlushFilteredKeys( FALSE );
++
+     for (count = 0; XCheckIfEvent( data->display, &event, filter_event, (XPointer)(UINT_PTR)mask ); count++)
+     {
+-        if (XFilterEvent( &event, None ) || host_window_filter_event( &event )) continue;
++        if (XFilterEvent( &event, None ))
++        {
++            /* imefix: hold keys the input method consumed, see keyboard.c */
++            if (event.type == KeyPress || event.type == KeyRelease)
++            {
++                HWND hwnd;
++                if (!XFindContext( data->display, event.xany.window, winContext, (char **)&hwnd ) && hwnd)
++                    X11DRV_FilteredKeyEvent( hwnd, &event );
++            }
++            continue;
++        }
++        if (host_window_filter_event( &event )) continue;
+         get_event_data( &event );
+         call_event_handler( data->display, &event );
+         free_event_data( &event );
+     }
+ 
++    X11DRV_FlushFilteredKeys( FALSE );
+     XFlush( gdi_display );
+     if (count) TRACE( "processed %d events\n", count );
+     NtUserSendHardwareInput( NULL, SEND_HWMSG_RAWINPUT, &input, 0 ); /* flush win32u accumulated motion */
+--- a/dlls/winex11.drv/keyboard.c	2026-11-17 11:09:53.542930340 +0900
++++ b/dlls/winex11.drv/keyboard.c	2026-11-17 11:52:55.916713266 +0900
+@@ -1511,6 +1511,115 @@
+     }
+ }
+ 
++/* imefix: key events the input method (XIM) filtered. On Windows the application still sees
++ * a key press while an IME composes, but with XIM a consumed KeyPress never reaches Wine.
++ * ibus filters every key and forwards back the ones it does not use (English mode), so a
++ * filtered key is held briefly: if it comes back it is handled normally, otherwise it is
++ * reported tagged so imm32 delivers it without typing the Latin letter. */
++#define IMEFIX_TAG 0x494d4546
++#define IMEFIX_DELAY 30
++static __thread struct imefix_key
++{
++    BOOL used;
++    int type;
++    unsigned int keycode;
++    Time time;
++    HWND hwnd;
++    WORD vkey, scan;
++    DWORD flags, event_time, tick;
++} imefix_keys[16]; /* per thread: each thread reads its own X display */
++
++static void imefix_send( struct imefix_key *key )
++{
++    INPUT input = {.type = INPUT_KEYBOARD};
++    TRACE_(key)( "imefix: reporting consumed keycode %u vkey 0x%X flags %#x\n",
++                 key->keycode, key->vkey, (int)key->flags );
++    input.ki.wVk = key->vkey & 0xff;
++    input.ki.wScan = key->scan & 0xff;
++    input.ki.dwFlags = key->flags;
++    input.ki.time = key->event_time;
++    input.ki.dwExtraInfo = IMEFIX_TAG;
++    key->used = FALSE;
++    NtUserSendHardwareInput( key->hwnd, 0, &input, 0 );
++}
++
++/* report held keys the input method did not forward back in time (or all with force) */
++void X11DRV_FlushFilteredKeys( BOOL force )
++{
++    DWORD now = NtGetTickCount();
++    unsigned int i, oldest;
++
++    for (;;)
++    {
++        oldest = ~0u;
++        for (i = 0; i < ARRAY_SIZE(imefix_keys); i++)
++        {
++            if (!imefix_keys[i].used) continue;
++            if (!force && now - imefix_keys[i].tick < IMEFIX_DELAY) continue;
++            if (oldest == ~0u || (int)(imefix_keys[i].tick - imefix_keys[oldest].tick) < 0) oldest = i;
++        }
++        if (oldest == ~0u) return;
++        imefix_send( &imefix_keys[oldest] );
++    }
++}
++
++void X11DRV_FilteredKeyEvent( HWND hwnd, XEvent *xev )
++{
++    XKeyEvent *event = &xev->xkey;
++    struct imefix_key *key = NULL;
++    unsigned int i;
++    WORD vkey, scan;
++
++    if (!event->keycode) return;
++
++    pthread_mutex_lock( &kbd_mutex );
++    scan = keyc2scan( event->keycode, event->state );
++    vkey = EVENT_event_to_vkey( 0, event );
++    pthread_mutex_unlock( &kbd_mutex );
++    if (!vkey) return;
++
++    for (i = 0; i < ARRAY_SIZE(imefix_keys); i++) if (!imefix_keys[i].used) { key = &imefix_keys[i]; break; }
++    if (!key)
++    {
++        X11DRV_FlushFilteredKeys( TRUE );
++        key = &imefix_keys[0];
++    }
++    key->used = TRUE;
++    key->type = event->type;
++    key->keycode = event->keycode;
++    key->time = event->time;
++    key->hwnd = hwnd;
++    key->vkey = vkey;
++    key->scan = scan;
++    key->flags = (event->type == KeyRelease ? KEYEVENTF_KEYUP : 0) |
++                 (scan_is_extended( scan ) ? KEYEVENTF_EXTENDEDKEY : 0);
++    key->event_time = EVENT_x11_time_to_win32_time( event->time );
++    key->tick = NtGetTickCount();
++    TRACE_(key)( "imefix: holding filtered %s keycode %u vkey 0x%X\n",
++                 event->type == KeyPress ? "KeyPress" : "KeyRelease", event->keycode, vkey );
++}
++
++/* called for every unfiltered key event before it is handled */
++static void imefix_unfiltered_key( XKeyEvent *event )
++{
++    unsigned int i;
++
++    for (i = 0; i < ARRAY_SIZE(imefix_keys); i++)
++    {
++        if (!imefix_keys[i].used) continue;
++        if (imefix_keys[i].keycode == event->keycode && imefix_keys[i].type == event->type &&
++            imefix_keys[i].time == event->time)
++        {
++            /* forwarded back by the input method: handle it as a normal key */
++            TRACE_(key)( "imefix: keycode %u forwarded back\n", event->keycode );
++            imefix_keys[i].used = FALSE;
++            return;
++        }
++    }
++    /* any other key: keep the order, report what is still held first */
++    X11DRV_FlushFilteredKeys( TRUE );
++}
++
+ /***********************************************************************
+  *           X11DRV_KeyEvent
+  *
+@@ -1533,6 +1642,8 @@
+     TRACE_(key)("type %d, window %lx, state 0x%04x, keycode %u\n",
+ 		event->type, event->window, event->state, event->keycode);
+ 
++    if (event->keycode) imefix_unfiltered_key( event );
++
+     if (event->type == KeyPress && (data = get_win_data( hwnd )))
+     {
+         window_set_user_time( data, event->time, FALSE );
+--- a/dlls/winex11.drv/x11drv.h	2026-11-17 11:09:53.544451203 +0900
++++ b/dlls/winex11.drv/x11drv.h	2026-11-17 11:52:43.988365277 +0900
+@@ -608,6 +608,8 @@
+ extern BOOL X11DRV_MotionNotify( HWND hwnd, XEvent *event );
+ extern BOOL X11DRV_EnterNotify( HWND hwnd, XEvent *event );
+ extern BOOL X11DRV_KeyEvent( HWND hwnd, XEvent *event );
++extern void X11DRV_FilteredKeyEvent( HWND hwnd, XEvent *event );
++extern void X11DRV_FlushFilteredKeys( BOOL force );
+ extern BOOL X11DRV_KeymapNotify( HWND hwnd, XEvent *event );
+ extern BOOL X11DRV_DestroyNotify( HWND hwnd, XEvent *event );
+ extern BOOL X11DRV_SelectionRequest( HWND hWnd, XEvent *event );

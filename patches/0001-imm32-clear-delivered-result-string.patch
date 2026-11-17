@@ -1,0 +1,46 @@
+--- a/dlls/imm32/ime.c	2026-08-08 20:48:00.000000000 +0900
++++ b/dlls/imm32/ime.c	2026-11-13 23:14:59.683049256 +0900
+@@ -414,6 +414,27 @@
+     ImmUnlockIMC( himc );
+     ImmGenerateMessage( himc );
+ 
++    /* imefix: the result string has now been delivered (messages are sent synchronously).
++     * Once composition has ended, clear it so later GCS_RESULTSTR queries (e.g. from a
++     * WM_CHAR handler) do not insert the same text again. */
++    if ((ctx = ImmLockIMC( himc )))
++    {
++        COMPOSITIONSTRING *compstr;
++        if ((compstr = ImmLockIMCC( ctx->hCompStr )))
++        {
++            if (!compstr->dwCompStrLen && compstr->dwResultStrLen)
++            {
++                TRACE( "imefix: clearing delivered result string\n" );
++                compstr->dwResultStrLen = compstr->dwResultStrOffset = 0;
++                compstr->dwResultClauseLen = compstr->dwResultClauseOffset = 0;
++                compstr->dwResultReadStrLen = compstr->dwResultReadStrOffset = 0;
++                compstr->dwResultReadClauseLen = compstr->dwResultReadClauseOffset = 0;
++            }
++            ImmUnlockIMCC( ctx->hCompStr );
++        }
++        ImmUnlockIMC( himc );
++    }
++
+     return count;
+ }
+ 
+@@ -611,6 +632,15 @@
+     if (status == STATUS_NOT_IMPLEMENTED)
+     {
+         TRANSMSG msg = {.message = vsc & KF_UP ? WM_KEYUP : WM_KEYDOWN, .wParam = vkey, .lParam = vsc};
++        /* imefix: the result string was already delivered by an earlier update; clear it so
++         * applications that query GCS_RESULTSTR on every key do not insert it again. */
++        if (!(vsc & KF_UP) && compstr->dwResultStrLen)
++        {
++            compstr->dwResultStrLen = compstr->dwResultStrOffset = 0;
++            compstr->dwResultClauseLen = compstr->dwResultClauseOffset = 0;
++            compstr->dwResultReadStrLen = compstr->dwResultReadStrOffset = 0;
++            compstr->dwResultReadClauseLen = compstr->dwResultReadClauseOffset = 0;
++        }
+         msgs->TransMsg[count++] = msg;
+     }
+     else if (status) WARN( "WINE_IME_TO_ASCII_EX returned unexpected status %#lx\n", status );
